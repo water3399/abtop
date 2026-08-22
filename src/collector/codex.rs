@@ -1,7 +1,7 @@
 use super::process::{self, ProcInfo};
 use crate::model::{
-    AgentSession, ChatMessage, ChatRole, ChildProcess, RateLimitInfo, SessionStatus, ToolCall,
-    MAX_CHAT_MESSAGES,
+    AgentSession, ChatMessage, ChatRole, ChildProcess, FileAccess, FileOp, RateLimitInfo,
+    SessionStatus, ToolCall, MAX_CHAT_MESSAGES, MAX_FILE_ACCESSES,
 };
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -664,7 +664,7 @@ impl CodexCollector {
                 tool_calls: result.tool_calls,
                 pending_since_ms: result.pending_since_ms,
                 thinking_since_ms: result.thinking_since_ms,
-                file_accesses: vec![],
+                file_accesses: result.file_accesses,
                 config_root: super::abbrev_path(
                     self.sessions_dir
                         .parent()
@@ -900,6 +900,9 @@ struct CodexJSONLResult {
     pending_since_ms: u64,
     /// Timestamp of the latest user prompt not yet followed by assistant output.
     thinking_since_ms: u64,
+    /// Files touched, from the item_completed schema (Codex ≥ ~0.149).
+    /// The old schema never carried file information.
+    file_accesses: Vec<FileAccess>,
 }
 
 impl CodexJSONLResult {
@@ -938,6 +941,135 @@ fn value_to_tool_arg(value: &Value) -> Option<String> {
 fn sanitize_tool_arg(arg: &str) -> String {
     let redacted = super::redact_secrets(arg);
     redacted.chars().take(120).collect()
+}
+
+/// Joined text of an item's `content` array. The schema is not consistent
+/// about casing ("Text" on AgentMessage, "text" on UserMessage), so any
+/// object with a string `text` field counts.
+fn concat_item_text(content: &Value) -> String {
+    content
+        .as_array()
+        .map(|parts| {
+            parts
+                .iter()
+                .filter_map(|p| p["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default()
+}
+
+/// One completed item from the new rollout schema (Codex ≥ ~0.149).
+///
+/// UserMessage/AgentMessage carry the chat, CommandExecution and Extension
+/// are the tool timeline, and FileChange is the only place file writes appear
+/// (the old schema never reported files at all).
+fn handle_item_completed(item: &Value, ts: u64, result: &mut CodexJSONLResult) {
+    match item["type"].as_str() {
+        Some("UserMessage") => {
+            result.model_generating = true;
+            result.thinking_since_ms = ts;
+            let text = concat_item_text(&item["content"]);
+            if !text.is_empty() {
+                if result.initial_prompt.is_empty() {
+                    let truncated: String = text.chars().take(120).collect();
+                    result.initial_prompt = super::redact_secrets(&truncated);
+                }
+                push_chat_message(
+                    &mut result.chat_messages,
+                    ChatRole::User,
+                    clean_chat_text(&text, 500),
+                );
+            }
+        }
+        Some("AgentMessage") => {
+            result.turn_count += 1;
+            result.model_generating = false;
+            result.thinking_since_ms = 0;
+            let text = concat_item_text(&item["content"]);
+            push_chat_message(
+                &mut result.chat_messages,
+                ChatRole::Assistant,
+                clean_chat_text(&text, 500),
+            );
+        }
+        Some("CommandExecution") => {
+            result.model_generating = false;
+            result.thinking_since_ms = 0;
+            let started = item["started_at_ms"].as_u64().unwrap_or(ts);
+            let completed = item["completed_at_ms"].as_u64().unwrap_or(started);
+            // parsed_cmd names the intent (read/write/search/…) and often a
+            // path; fall back to the raw argv when it is absent.
+            let parsed = &item["parsed_cmd"][0];
+            let name = parsed["type"].as_str().unwrap_or("exec").to_string();
+            let arg_raw = parsed["cmd"]
+                .as_str()
+                .map(str::to_string)
+                .or_else(|| value_to_tool_arg(&item["command"]))
+                .unwrap_or_default();
+            if result.tool_calls.len() < 500 {
+                result.tool_calls.push(ToolCall {
+                    name,
+                    arg: sanitize_tool_arg(&arg_raw),
+                    duration_ms: completed.saturating_sub(started),
+                });
+            }
+            if let Some(entries) = item["parsed_cmd"].as_array() {
+                for pc in entries {
+                    let Some(path) = pc["path"].as_str() else { continue };
+                    let op = match pc["type"].as_str() {
+                        Some("write") => FileOp::Write,
+                        _ => FileOp::Read,
+                    };
+                    push_file_access(result, path, op);
+                }
+            }
+        }
+        Some("FileChange") => {
+            result.model_generating = false;
+            if let Some(changes) = item["changes"].as_object() {
+                for (path, change) in changes {
+                    let op = match change["type"].as_str() {
+                        Some("add") => FileOp::Write,
+                        _ => FileOp::Edit,
+                    };
+                    push_file_access(result, path, op);
+                    if result.tool_calls.len() < 500 {
+                        let short = path.rsplit('/').next().unwrap_or(path);
+                        result.tool_calls.push(ToolCall {
+                            name: "edit".to_string(),
+                            arg: sanitize_tool_arg(short),
+                            duration_ms: 0,
+                        });
+                    }
+                }
+            }
+        }
+        Some("Extension") => {
+            let name = item["kind"].as_str().unwrap_or("extension").to_string();
+            let arg = item["query"].as_str().unwrap_or_default();
+            if result.tool_calls.len() < 500 {
+                result.tool_calls.push(ToolCall {
+                    name,
+                    arg: sanitize_tool_arg(arg),
+                    duration_ms: 0,
+                });
+            }
+        }
+        _ => {}
+    }
+}
+
+fn push_file_access(result: &mut CodexJSONLResult, path: &str, op: FileOp) {
+    result.file_accesses.push(FileAccess {
+        path: path.to_string(),
+        operation: op,
+        turn_index: result.turn_count,
+    });
+    let len = result.file_accesses.len();
+    if len > MAX_FILE_ACCESSES {
+        result.file_accesses.drain(..len - MAX_FILE_ACCESSES);
+    }
 }
 
 fn push_chat_message(messages: &mut Vec<ChatMessage>, role: ChatRole, text: String) {
@@ -1082,6 +1214,7 @@ fn parse_codex_jsonl(path: &Path) -> Option<CodexJSONLResult> {
         tool_calls: Vec::new(),
         pending_since_ms: 0,
         thinking_since_ms: 0,
+        file_accesses: Vec::new(),
     };
     let mut call_indices: HashMap<String, usize> = HashMap::new();
     let mut call_starts: HashMap<String, u64> = HashMap::new();
@@ -1164,6 +1297,24 @@ fn parse_codex_jsonl(path: &Path) -> Option<CodexJSONLResult> {
                         if let Some(cw) = payload["model_context_window"].as_u64() {
                             result.context_window = cw;
                         }
+                        // New schema (Codex ≥ ~0.149) has no user_message
+                        // event; a turn starting is the "model is working"
+                        // signal until an AgentMessage or task_complete lands.
+                        result.model_generating = true;
+                        if result.thinking_since_ms == 0 {
+                            result.thinking_since_ms = event_timestamp_ms(&val).unwrap_or(0);
+                        }
+                    }
+                    // Newer Codex versions replaced the
+                    // user_message/agent_message/function_call vocabulary
+                    // with item_completed wrappers.
+                    Some("item_completed") => {
+                        let ts = event_timestamp_ms(&val).unwrap_or(0);
+                        handle_item_completed(&payload["item"], ts, &mut result);
+                    }
+                    Some("turn_aborted") => {
+                        result.model_generating = false;
+                        result.thinking_since_ms = 0;
                     }
                     Some("user_message") => {
                         result.model_generating = true;
@@ -2201,5 +2352,79 @@ mod tests {
     fn test_parse_codex_empty_returns_none() {
         let file = tempfile::NamedTempFile::new().unwrap();
         assert!(parse_codex_jsonl(file.path()).is_none());
+    }
+
+    #[test]
+    fn test_item_completed_chat_and_turns() {
+        // Codex ≥ ~0.149: chat arrives as item_completed wrappers. Note the
+        // casing drift — "text" on UserMessage content, "Text" on AgentMessage.
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        write_lines(
+            &mut file,
+            &[
+                SESSION_META,
+                r#"{"type":"event_msg","timestamp":"2026-08-21T05:45:27Z","payload":{"type":"item_completed","item":{"type":"UserMessage","id":"u1","content":[{"type":"text","text":"please fix the build"}]}}}"#,
+                r#"{"type":"event_msg","timestamp":"2026-08-21T05:45:54Z","payload":{"type":"item_completed","item":{"type":"AgentMessage","id":"a1","content":[{"type":"Text","text":"done"}],"phase":"final_answer"}}}"#,
+            ],
+        );
+        let result = parse_codex_jsonl(file.path()).unwrap();
+        assert_eq!(result.chat_messages.len(), 2);
+        assert_eq!(result.chat_messages[0].text, "please fix the build");
+        assert_eq!(result.chat_messages[1].text, "done");
+        assert_eq!(result.turn_count, 1);
+        assert!(!result.model_generating, "AgentMessage ends the turn");
+        assert_eq!(result.initial_prompt, "please fix the build");
+    }
+
+    #[test]
+    fn test_item_completed_trailing_user_message_marks_generating() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        write_lines(
+            &mut file,
+            &[
+                SESSION_META,
+                r#"{"type":"event_msg","timestamp":"2026-08-21T05:45:27Z","payload":{"type":"item_completed","item":{"type":"UserMessage","id":"u1","content":[{"type":"text","text":"go"}]}}}"#,
+            ],
+        );
+        let result = parse_codex_jsonl(file.path()).unwrap();
+        assert!(result.model_generating, "unanswered UserMessage means the model is working");
+    }
+
+    #[test]
+    fn test_item_completed_command_execution_tools_and_files() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        write_lines(
+            &mut file,
+            &[
+                SESSION_META,
+                r#"{"type":"event_msg","timestamp":"2026-08-21T05:46:11Z","payload":{"type":"item_completed","item":{"type":"CommandExecution","id":"exec-1","command":["/bin/zsh","-lc","sed -n '1,240p' README.md"],"parsed_cmd":[{"type":"read","cmd":"sed -n '1,240p' README.md","name":"README.md","path":"/work/README.md"}],"started_at_ms":1787291167583,"completed_at_ms":1787291168442}}}"#,
+            ],
+        );
+        let result = parse_codex_jsonl(file.path()).unwrap();
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].name, "read");
+        assert_eq!(result.tool_calls[0].duration_ms, 859);
+        assert_eq!(result.file_accesses.len(), 1);
+        assert_eq!(result.file_accesses[0].path, "/work/README.md");
+        assert!(matches!(result.file_accesses[0].operation, FileOp::Read));
+    }
+
+    #[test]
+    fn test_item_completed_file_change_records_accesses() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        write_lines(
+            &mut file,
+            &[
+                SESSION_META,
+                r#"{"type":"event_msg","timestamp":"2026-08-21T06:10:59Z","payload":{"type":"item_completed","item":{"type":"FileChange","id":"exec-2","changes":{"/work/new.md":{"type":"add"},"/work/old.rs":{"type":"update"}}}}}"#,
+            ],
+        );
+        let result = parse_codex_jsonl(file.path()).unwrap();
+        assert_eq!(result.file_accesses.len(), 2);
+        let write = result.file_accesses.iter().find(|f| f.path == "/work/new.md").unwrap();
+        let edit = result.file_accesses.iter().find(|f| f.path == "/work/old.rs").unwrap();
+        assert!(matches!(write.operation, FileOp::Write));
+        assert!(matches!(edit.operation, FileOp::Edit));
+        assert_eq!(result.tool_calls.len(), 2, "each change also lands on the tool timeline");
     }
 }
