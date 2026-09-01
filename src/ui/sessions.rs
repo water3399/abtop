@@ -85,7 +85,7 @@ pub(crate) fn draw_sessions_panel_active(
     // visible first; add lower-value columns back as width allows.
     let w = inner.width;
     let show_pid = w >= 120;
-    let show_session_title = w >= 76;
+    let show_session_id = w >= 76;
     let show_config = w >= 100;
     let show_model = w >= 90;
     let show_tokens = w >= 86;
@@ -99,9 +99,12 @@ pub(crate) fn draw_sessions_panel_active(
     } else {
         8
     };
-    // Keep enough room for roughly 4–5 CJK characters plus an ellipsis.
-    let session_title_w: u16 = if w >= 110 { 11 } else { 9 };
-    let session_title_label = t("col.title");
+    let session_w: u16 = if w >= 110 { 9 } else { 5 };
+    let session_label = if w >= 110 {
+        t("col.session")
+    } else {
+        t("col.sess")
+    };
     let config_w: u16 = if w >= 110 { 14 } else { 10 };
     let config_label = if w >= 110 {
         t("col.config")
@@ -168,6 +171,12 @@ pub(crate) fn draw_sessions_panel_active(
             Style::default()
         };
 
+        let sid_short = if session.session_id.len() >= 8 {
+            &session.session_id[..8]
+        } else {
+            &session.session_id
+        };
+
         let summary_col = app.session_summary(session);
 
         let mut cells = vec![
@@ -184,10 +193,10 @@ pub(crate) fn draw_sessions_panel_active(
             truncate_str(&session.project_name, project_w as usize),
             Style::default().fg(theme.title),
         )));
-        if show_session_title {
+        if show_session_id {
             cells.push(Cell::from(Span::styled(
-                truncate_str(&summary_col, session_title_w as usize),
-                Style::default().fg(theme.main_fg),
+                truncate_str(sid_short, session_w as usize),
+                Style::default().fg(theme.session_id),
             )));
         }
         if show_config {
@@ -246,11 +255,10 @@ pub(crate) fn draw_sessions_panel_active(
         rows.push(Row::new(cells).style(row_style).height(1));
 
         // 2nd line: task text in Summary column
-        let summary_idx =
-            3 + show_pid as usize + show_session_title as usize + show_config as usize;
+        let summary_idx = 3 + show_pid as usize + show_session_id as usize + show_config as usize;
         let total_cols = 6
             + show_pid as usize
-            + show_session_title as usize
+            + show_session_id as usize
             + show_config as usize
             + show_model as usize
             + show_tokens as usize
@@ -301,7 +309,7 @@ pub(crate) fn draw_sessions_panel_active(
                     truncate_str(&sa.name, project_w as usize),
                     Style::default().fg(theme.graph_text),
                 )));
-                if show_session_title {
+                if show_session_id {
                     sa_cells.push(Cell::from(""));
                 }
                 if show_config {
@@ -343,11 +351,8 @@ pub(crate) fn draw_sessions_panel_active(
         header_cells.push(Cell::from(Span::styled(t("col.pid"), header_style)));
     }
     header_cells.push(Cell::from(Span::styled(t("col.project"), header_style)));
-    if show_session_title {
-        header_cells.push(Cell::from(Span::styled(
-            session_title_label,
-            header_style,
-        )));
+    if show_session_id {
+        header_cells.push(Cell::from(Span::styled(session_label, header_style)));
     }
     if show_config {
         header_cells.push(Cell::from(Span::styled(config_label, header_style)));
@@ -379,8 +384,8 @@ pub(crate) fn draw_sessions_panel_active(
         widths_vec.push(Constraint::Length(6)); // pid
     }
     widths_vec.push(Constraint::Length(project_w)); // project
-    if show_session_title {
-        widths_vec.push(Constraint::Length(session_title_w)); // session title
+    if show_session_id {
+        widths_vec.push(Constraint::Length(session_w)); // session id
     }
     if show_config {
         widths_vec.push(Constraint::Length(config_w)); // config root
@@ -1341,45 +1346,6 @@ mod tests {
     #[test]
     fn task_row_text_respects_terminal_display_width() {
         assert_eq!(task_row_text("ＡＢＣＤ", 6), "└─ Ａ…");
-    }
-
-    #[test]
-    fn session_table_shows_truncated_title_instead_of_session_id() {
-        let mut app = App::new_with_config(Theme::default(), &[], PanelVisibility::default());
-        let mut session = test_session("codex-session", "project");
-        session.initial_prompt = "查詢應用程式內容".into();
-        app.sessions = vec![session];
-
-        let backend = TestBackend::new(120, 14);
-        let mut terminal = Terminal::new(backend).unwrap();
-        let area = Rect {
-            x: 0,
-            y: 0,
-            width: 120,
-            height: 14,
-        };
-
-        terminal
-            .draw(|f| draw_sessions_panel(f, &app, area, &app.theme))
-            .unwrap();
-
-        let buffer = terminal.backend().buffer();
-        let header_row = (0..area.width).fold(String::new(), |mut row, x| {
-            row.push_str(buffer[(x, 1)].symbol());
-            row
-        });
-        let session_row = (0..area.width).fold(String::new(), |mut row, x| {
-            row.push_str(buffer[(x, 2)].symbol());
-            row
-        });
-
-        let compact_session_row = session_row.replace(' ', "");
-        assert!(header_row.contains("Title"), "{header_row}");
-        assert!(
-            compact_session_row.contains("查詢應用程…"),
-            "{session_row}"
-        );
-        assert!(!session_row.contains("codex-se"), "{session_row}");
     }
 
     #[test]

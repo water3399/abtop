@@ -33,7 +33,6 @@ static LOCALE_EN: LazyLock<std::collections::HashMap<&str, &str>> = LazyLock::ne
     m.insert("col.project", "Project");
     m.insert("col.session", "Session");
     m.insert("col.sess", "Sess");
-    m.insert("col.title", "Title");
     m.insert("col.summary", "Summary");
     m.insert("col.status", "Status");
     m.insert("col.model", "Model");
@@ -282,7 +281,6 @@ static LOCALE_ZH: LazyLock<std::collections::HashMap<&str, &str>> = LazyLock::ne
     m.insert("col.project", "项目");
     m.insert("col.session", "会话");
     m.insert("col.sess", "会");
-    m.insert("col.title", "标题");
     m.insert("col.summary", "摘要");
     m.insert("col.status", "状态");
     m.insert("col.model", "模型");
