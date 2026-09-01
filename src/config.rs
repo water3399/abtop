@@ -35,7 +35,7 @@ pub struct AppConfig {
     pub claude_config_dirs: Vec<PathBuf>,
     pub panels: PanelVisibility,
     /// UI language override. Empty string means auto-detect from `LANG`.
-    /// Recognized values: "en", "zh" (anything starting with "zh" maps to Simplified Chinese).
+    /// Recognized values: "en", "zh" (Simplified Chinese), "zh-TW" (Traditional Chinese).
     pub language: String,
 }
 

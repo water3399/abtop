@@ -9,12 +9,19 @@ static CURRENT_LANG: LazyLock<&str> = LazyLock::new(|| {
     } else {
         env::var("LANG").unwrap_or_default()
     };
-    if lang.to_lowercase().starts_with("zh") {
+    normalize_language(&lang)
+});
+
+fn normalize_language(lang: &str) -> &'static str {
+    let lang = lang.to_ascii_lowercase().replace('_', "-");
+    if lang.starts_with("zh-tw") || lang.starts_with("zh-hant") {
+        "zh-TW"
+    } else if lang.starts_with("zh") {
         "zh-CN"
     } else {
         "en"
     }
-});
+}
 
 static LOCALE_EN: LazyLock<std::collections::HashMap<&str, &str>> = LazyLock::new(|| {
     let mut m = std::collections::HashMap::new();
@@ -509,16 +516,90 @@ static LOCALE_ZH: LazyLock<std::collections::HashMap<&str, &str>> = LazyLock::ne
     m
 });
 
+// Traditional Chinese is intentionally scoped to the help overlay and footer.
+// Other labels fall back to English until they have been reviewed for terminal width.
+static LOCALE_ZH_TW: LazyLock<std::collections::HashMap<&str, &str>> = LazyLock::new(|| {
+    let mut m = std::collections::HashMap::new();
+
+    // Help panel
+    m.insert("help.title", " 快捷鍵說明 ");
+    m.insert("help.navigation", "操作導覽");
+    m.insert("help.actions", "動作");
+    m.insert("help.views", "顯示");
+    m.insert("help.help", "說明");
+    m.insert("help.press_key", " 按任意鍵關閉 ");
+    m.insert("help.select_session", "選擇 Session");
+    m.insert("help.jump_tmux", "切換到 Session 終端機");
+    m.insert("help.filter", "篩選 Session");
+    m.insert("help.clear_filter", "清除篩選／關閉視窗");
+    m.insert("help.kill_session", "終止選取的 Session");
+    m.insert("help.kill_orphans", "關閉孤立連接埠");
+    m.insert("help.refresh", "強制重新整理");
+    m.insert("help.quit", "離開");
+    m.insert("help.view_menu", "開啟顯示選單");
+    m.insert("help.open_config", "開啟設定");
+    m.insert("help.cycle_theme", "切換主題／樹狀檢視");
+    m.insert("help.toggle_timeline", "顯示／隱藏時間軸");
+    m.insert("help.toggle_file_audit", "顯示／隱藏檔案紀錄");
+    m.insert("help.toggle_panels", "顯示／隱藏各面板");
+    m.insert("help.mcp_suppress", "顯示／隱藏 MCP Server Session");
+    m.insert("help.this_help", "顯示這份說明");
+
+    // Footer
+    m.insert("footer.select", "選擇");
+    m.insert("footer.kill", "終止");
+    m.insert("footer.filter", "篩選");
+    m.insert("footer.view", "顯示");
+    m.insert("footer.config", "設定");
+    m.insert("footer.help", "說明");
+    m.insert("footer.quit", "離開");
+    m.insert("footer.sessions", "個 Session");
+    m.insert("footer.auto", "自動");
+    m.insert("footer.peak_hours", "Claude 高峰時段");
+    m.insert("footer.resets_in", "剩餘");
+    m.insert("footer.esc_clear", "Esc 清除，Enter 保留");
+    m.insert("footer.jump", "跳轉");
+
+    m
+});
+
 pub fn t(key: &str) -> String {
-    if *CURRENT_LANG == "zh-CN" {
-        LOCALE_ZH
+    match *CURRENT_LANG {
+        "zh-CN" => LOCALE_ZH
             .get(key)
             .map(|s| s.to_string())
-            .unwrap_or_else(|| key.to_string())
-    } else {
-        LOCALE_EN
+            .unwrap_or_else(|| key.to_string()),
+        "zh-TW" => LOCALE_ZH_TW
+            .get(key)
+            .or_else(|| LOCALE_EN.get(key))
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| key.to_string()),
+        _ => LOCALE_EN
             .get(key)
             .map(|s| s.to_string())
-            .unwrap_or_else(|| key.to_string())
+            .unwrap_or_else(|| key.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalizes_traditional_chinese_language_codes() {
+        assert_eq!(normalize_language("zh-TW"), "zh-TW");
+        assert_eq!(normalize_language("zh_Hant_TW.UTF-8"), "zh-TW");
+        assert_eq!(normalize_language("zh-CN"), "zh-CN");
+        assert_eq!(normalize_language("en_US.UTF-8"), "en");
+    }
+
+    #[test]
+    fn traditional_chinese_covers_help_and_footer() {
+        for key in LOCALE_EN
+            .keys()
+            .filter(|key| key.starts_with("help.") || key.starts_with("footer."))
+        {
+            assert!(LOCALE_ZH_TW.contains_key(key), "missing {key}");
+        }
     }
 }

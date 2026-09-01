@@ -132,17 +132,18 @@ hidden_agents = ["codex"]
 # both sessions/ and projects/.
 claude_config_dirs = ["~/.claude-personal", "~/.claude-work-team"]
 # UI language. Omit or leave empty to auto-detect from LANG.
-language = "zh"
+language = "zh-TW"
 ```
 
 ### Supported Languages
 
-| Code | Language            |
-| ---- | ------------------- |
-| `en` | English (default)   |
-| `zh` | Simplified Chinese  |
+| Code    | Language                                  |
+| ------- | ----------------------------------------- |
+| `en`    | English (default)                         |
+| `zh`    | Simplified Chinese                        |
+| `zh-TW` | Traditional Chinese (help and footer)     |
 
-When `language` is unset, abtop auto-detects from `LANG` — any value starting with `zh` switches to Simplified Chinese, otherwise English.
+When `language` is unset, abtop auto-detects from `LANG`. `zh-TW` and `zh-Hant` select Traditional Chinese; other values starting with `zh` select Simplified Chinese; everything else uses English.
 
 ## Key Bindings
 
