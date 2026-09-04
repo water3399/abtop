@@ -20,15 +20,20 @@ rl = data.get('rate_limits')
 if not rl:
     sys.exit(0)
 out = {'source': 'claude', 'updated_at': int(time.time())}
-fh = rl.get('five_hour')
+fh = rl.get('five_hour') or rl.get('session')
 if fh:
     out['five_hour'] = {'used_percentage': fh.get('used_percentage', 0), 'resets_at': fh.get('resets_at', 0)}
-sd = rl.get('seven_day')
+sd = rl.get('seven_day') or rl.get('weekly')
 if sd:
     out['seven_day'] = {'used_percentage': sd.get('used_percentage', 0), 'resets_at': sd.get('resets_at', 0)}
+if 'five_hour' not in out and 'seven_day' not in out:
+    sys.exit(0)
 config_dir = os.environ.get('CLAUDE_CONFIG_DIR', os.path.join(os.path.expanduser('~'), '.claude'))
-with open(os.path.join(config_dir, 'abtop-rate-limits.json'), 'w') as f:
+path = os.path.join(config_dir, 'abtop-rate-limits.json')
+tmp = path + '.tmp'
+with open(tmp, 'w') as f:
     json.dump(out, f)
+os.replace(tmp, path)
 " 2>/dev/null
 "#;
 
@@ -142,4 +147,42 @@ pub fn run_setup() {
 
     println!("\n  done! rate limit data will appear in abtop after the next Claude response.");
     println!("  restart any running Claude Code sessions to activate.");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    #[test]
+    fn statusline_hook_accepts_session_and_weekly_rate_limits() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("abtop-statusline.sh");
+        fs::write(&script, STATUSLINE_SCRIPT).unwrap();
+
+        let mut child = Command::new("bash")
+            .arg(&script)
+            .env("CLAUDE_CONFIG_DIR", dir.path())
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(
+                br#"{"rate_limits":{"session":{"used_percentage":12,"resets_at":100},"weekly":{"used_percentage":34,"resets_at":200}}}"#,
+            )
+            .unwrap();
+        drop(child.stdin.take());
+        assert!(child.wait().unwrap().success());
+
+        let output: Value = serde_json::from_str(
+            &fs::read_to_string(dir.path().join("abtop-rate-limits.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(output["five_hour"]["used_percentage"], 12);
+        assert_eq!(output["seven_day"]["used_percentage"], 34);
+    }
 }
